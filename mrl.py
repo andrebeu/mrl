@@ -17,11 +17,10 @@ import scipy
   the current random seed
 """
 
-
-
+EPLEN = 75
 class SwitchingBandits():
 
-  def __init__(self,shiftpr=0.1,armpr=0.9,eplen=75):
+  def __init__(self,shiftpr=0.1,armpr=0.9,eplen=EPLEN):
     self.banditpr = np.array([armpr,1-armpr])
     self.shiftpr = shiftpr
     self.final_state = eplen
@@ -63,24 +62,25 @@ class MRLAgent():
 
   def build(self):
     with self.graph.as_default():
-      self.misc_placeholders()
       # forward propagate inputs
       self.concat_inputs = self.input_placeholders() # [r(t-1),action(t-1),obs(t)]
+      self.misc_placeholders()
       self.value,self.policy = self.RNN(self.concat_inputs)
       # setup loss
-      self.target_value,self.advantages = self.loss_placeholders()
+      self.returns,self.deltas = self.loss_placeholders()
       self.loss = self.setup_loss()
-      self.minimizer = tf.train.RMSPropOptimizer(0.0007).minimize(self.loss)
+      self.minimizer = tf.train.RMSPropOptimizer(0.00005).minimize(self.loss)
       ## initialize
       self.sess.run(tf.global_variables_initializer())
 
-  def setup_loss(self):
+  def setup_loss_(self):
     """ 
     sums range over episode
     """  
     ## Loss functions
     # policy loss: L = A(s,a) * -logpi(a|s)
     pr_action_t = tf.reduce_sum(self.policy * self.actions_t_onehot) 
+
     policy_loss = - tf.reduce_sum(tf.log(pr_action_t + 1e-7) * self.advantages)
     #
     value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_value - self.value)) 
@@ -88,14 +88,18 @@ class MRLAgent():
     loss = 0.5 * value_loss + policy_loss - entropy_loss * 0.05
     return loss
 
-  def setup_loss_(self):
+  def setup_loss(self):
     """ 
-    sums range over episode
     """  
-    ## Loss functions
-    # Return 
-    # policy loss: L = A(s,a) * -logpi(a|s)
-    
+    # L_v = delta*value
+    loss_value = self.value*self.deltas
+    # L_p = log(pi(a|s))*delta
+    pi_a = tf.reduce_sum(self.policy * self.actions_t_onehot)
+    loss_policy = tf.log(pi_a) * self.deltas
+    # L_e = H(pi(a|s))
+    loss_entropy = - tf.reduce_sum(self.policy * tf.log(self.policy + 1e-7))
+    # final loss
+    loss = loss_policy + 0.05*loss_value + 0.05*loss_entropy
     return loss
 
   def RNN(self,concat_inputs):
@@ -117,24 +121,26 @@ class MRLAgent():
                     activation=tf.nn.softmax,
                     kernel_initializer='glorot_uniform')
     # dropout layers
-    value_dropout = tf.keras.layers.Dropout(self.dropout_rate)
-    policy_dropout = tf.keras.layers.Dropout(self.dropout_rate)
+    # value_dropout = tf.keras.layers.Dropout(self.dropout_rate)
+    # policy_dropout = tf.keras.layers.Dropout(self.dropout_rate)
     # activations
     lstm_outputs,final_output,lstm_state = lstm_layer(concat_inputs,initial_state=init_state)
-    value = value_dropout(value_layer(lstm_outputs))
-    policy = policy_dropout(policy_layer(lstm_outputs))
+    # value = value_dropout(value_layer(lstm_outputs))
+    # policy = policy_dropout(policy_layer(lstm_outputs))
+    value = value_layer(lstm_outputs)
+    policy = policy_layer(lstm_outputs)
     return value,policy
 
   def loss_placeholders(self):
     with self.graph.as_default():
       ## loss placeholders
-      target_value = tf.placeholder(name='target_value_ph',
-            shape=[1,None,1],
-            dtype=tf.float32) 
-      advantages = tf.placeholder(name='advantages_ph',
-            shape=[None,1],
+      returns = tf.placeholder(name='returns',
+            shape=[1,None], 
             dtype=tf.float32)
-      return target_value,advantages
+      deltas = tf.placeholder(name='deltas',
+              shape=[1,None], 
+              dtype=tf.float32)
+    return returns,deltas
 
   def input_placeholders(self):
     """
@@ -169,20 +175,23 @@ class MRLAgent():
     return concat_inputs
 
   def misc_placeholders(self):
-    self.dropout_rate = tf.placeholder(name='dropout_rate',
+    with self.graph.as_default():
+      self.dropout_rate = tf.placeholder(name='dropout_rate',
             shape=[],
             dtype=tf.float32)
     return None
+ 
   ## Training and evaluating
 
   def unroll_episode(self,training=False):
     """
     unroll agent on environment over an episode
     return data from episode 
+      [state,action,reward,value(state)]_i for i [0,eplen)
     """
     ## initialize episode
     episode_buffer = []
-    terminal_state = False
+    terminate = False
     reward_t = 0
     action_t = 0
     state_t = 0
@@ -190,63 +199,53 @@ class MRLAgent():
       dropout_rate = 0.1
     else:
       dropout_rate = 0.0
-    ## unroll episode feeding placeholders in online mode
     self.env.reset()
-    while terminal_state == False:
-      # print('state',state_t)
+    ## unroll episode feeding placeholders in online mode
+    while terminate == False:
       action_dist,value_state_t = self.sess.run(
         [self.policy,self.value], 
           feed_dict={
-            self.rewards_tm1: [[reward_t]], # batch,time,dim
+            self.rewards_tm1: [[reward_t]], 
             self.states_t: [[state_t]],
             self.actions_tm1: [action_t],
-            self.dropout_rate: dropout_rate
+            # self.dropout_rate: dropout_rate
             }) 
       # Take an action using probabilities from policy network output.
       action_t = np.random.choice([0,1],p=action_dist.squeeze())
       # observe reward and next_state
-      state_t, reward_t, terminal_state = self.env.pullArm(action_t)
+      state_t, reward_t, terminate = self.env.pullArm(action_t)
       # collect episode information in buffer
       episode_buffer.append([state_t, action_t, reward_t, value_state_t])
     return np.array(episode_buffer)
 
   def update(self,episode_buffer):
     """
-    episode_buffer contains [[state,action,reward,value(state)]]
+    episode_buffer contains [state,action,reward,value(state)]_i for i [0,eplen)
     using rollout data, compute advantage and discounted returns
     """
     ep_states = episode_buffer[:,0:1] 
     ep_actions = episode_buffer[:,1]
     ep_rewards = episode_buffer[:,2:3]
-    ep_values = episode_buffer[:,3:4]
-    # shifted reward and action
+    ep_values = episode_buffer[:,3]
+    ## compute return, and td advantage error
+    ep_returns = compute_returns(ep_rewards,ep_values[-1],self.gamma)
+    ep_deltas = ep_returns - ep_values
+    # shifted actions and rewards
     ep_rewards_tm1 = np.insert(ep_rewards[:-1,:],0,0,axis=0)
     ep_actions_tm1 = np.insert(ep_actions[:-1],0,0)
-    # not sure what this is for
-    ep_rewards_ = np.insert(ep_rewards,0,-1,axis=0)
-    ep_values_ = np.insert(ep_values,0,-1,axis=0)
-    # discount and compute advatnage
-    ep_discounted_rewards = discount(ep_rewards_,self.gamma)[:-1]
-    # print(ep_rewards.sum(),ep_discounted_rewards)
-    ep_advantages = ep_rewards + self.gamma * ep_values_[1:] - ep_values_[:-1]
-    ep_discounted_advantages = discount(ep_advantages,self.gamma)
+    # ep_discounted_advantages = discount(ep_advantages,self.gamma)
     ## update network using data from episode unroll
     feed_dict = {
-        self.states_t: ep_states,
-        self.actions_t: ep_actions,
-        self.rewards_tm1: ep_rewards_tm1,
-        self.actions_tm1: ep_actions_tm1,
-        self.target_value: [ep_discounted_rewards],
-        self.advantages: ep_discounted_advantages,
-        self.dropout_rate: 0.0
+        self.states_t:ep_states,
+        self.actions_t:ep_actions,
+        self.rewards_tm1:ep_rewards_tm1,
+        self.actions_tm1:ep_actions_tm1,
+        self.returns:[ep_returns],
+        self.deltas:[ep_deltas],
+        # self.dropout_rate:0.0
         }
-    ep_loss,pi,_ = self.sess.run([
-                      self.loss,
-                      self.policy,
-                      self.minimizer
-                      ],feed_dict=feed_dict)
-    # print('l',ep_loss,'r',ep_discounted_rewards.sum())
-    return ep_loss,ep_rewards.mean()
+    self.sess.run(self.minimizer,feed_dict=feed_dict)
+    return None
 
   def train(self,nepisodes_train):
     """
@@ -256,20 +255,25 @@ class MRLAgent():
       if ep%(nepisodes_train/100)==0:
         print(ep/nepisodes_train)
       episode_buffer = self.unroll_episode(training=True)
-      _,ep_reward = self.update(episode_buffer)
-      rewards_train[ep] = ep_reward
-    return rewards_train
+      self.update(episode_buffer)
+    return None
 
   def eval(self,nepisodes_eval):
     """ 
     """
-    rewards_eval = np.ones([nepisodes_eval,75])*100
+    rewards_eval = np.ones([nepisodes_eval,EPLEN])*100
     for i in range(nepisodes_eval):
       ep_buf = self.unroll_episode(training=False)
       r = ep_buf[:,2]
       rewards_eval[i] = r
     return rewards_eval
-      
+    
 
-def discount(x, gamma):
-  return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+def compute_returns(rewards,value_T,gamma):
+  eplen = len(rewards)
+  final_state = eplen-1
+  returns = np.ones(eplen)*898
+  returns[-1] = value_T
+  for t in range(final_state-1,-1,-1):
+    returns[t] = rewards[t] + gamma*returns[t+1]
+  return returns
