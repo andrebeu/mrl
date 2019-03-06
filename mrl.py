@@ -5,19 +5,17 @@ import scipy
 
 
 """ TODO
+
 - random length episodes during training, fixed length episodes during eval
-- loss parameters
 - different rand seeds
 
 -- setup param sweep, which takes snapshots (i.e. eval on held out trials) 
   at multiple times during training
 
-- concern: currently seeing very little learning. this might be lack of optimization
-  or my implementation might just be learning which arm is more likely under 
-  the current random seed
 """
 
 EPLEN = 75
+
 class SwitchingBandits():
 
   def __init__(self,shiftpr=0.1,armpr=0.9,eplen=EPLEN):
@@ -45,9 +43,42 @@ class SwitchingBandits():
     return self.state,reward,terminate
 
 
+class BanditsSim1():
+
+  def __init__(self):
+    self.reset()
+    
+  def reset(self):
+    eplen = np.random.uniform(50,100)
+    p0 = np.random.uniform(0,0.5) 
+    self.new_episode(eplen,p0)
+
+  def new_episode(self,eplen,p0):
+    self.state = 0
+    self.final_state = eplen-1
+    self.p0 = np.array([p0,0.5-p0])
+    self.n_a = np.array([0,0])
+
+  def pullArm(self,action):
+    # compute pr_reward(action)
+    self.pr_reward = 1-(1-self.p0[action])**(self.n_a[action]+1)
+    # self.pr_rewards = [1-(1-self.p0[0])**(self.n_a[0]+1),
+    #                   1-(1-self.p0[1])**(self.n_a[1]+1)]
+    # draw reward
+    reward = np.random.binomial(1,self.pr_reward)
+    # update n(a)
+    self.n_a[action] = 0
+    self.n_a[(action+1)%2] += 1
+    # final state
+    terminate = self.state >= self.final_state
+    # update state
+    self.state += 1
+    return self.state,reward,terminate
+
+
 class MRLAgent():
 
-  def __init__(self,stsize=50,gamma=0.9,task=SwitchingBandits(shiftpr=0)):
+  def __init__(self,stsize=50,gamma=0.9,task=BanditsSim1()):
     """
     """
     self.num_actions = 2
@@ -64,7 +95,6 @@ class MRLAgent():
     with self.graph.as_default():
       # forward propagate inputs
       self.concat_inputs = self.input_placeholders() # [r(t-1),action(t-1),obs(t)]
-      self.misc_placeholders()
       self.value,self.policy = self.RNN(self.concat_inputs)
       # setup loss
       self.returns,self.deltas = self.loss_placeholders()
@@ -80,7 +110,6 @@ class MRLAgent():
     ## Loss functions
     # policy loss: L = A(s,a) * -logpi(a|s)
     pr_action_t = tf.reduce_sum(self.policy * self.actions_t_onehot) 
-
     policy_loss = - tf.reduce_sum(tf.log(pr_action_t + 1e-7) * self.advantages)
     #
     value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_value - self.value)) 
@@ -174,16 +203,10 @@ class MRLAgent():
               ],-1)
     return concat_inputs
 
-  def misc_placeholders(self):
-    with self.graph.as_default():
-      self.dropout_rate = tf.placeholder(name='dropout_rate',
-            shape=[],
-            dtype=tf.float32)
-    return None
  
   ## Training and evaluating
 
-  def unroll_episode(self,training=False):
+  def unroll_episode(self,):
     """
     unroll agent on environment over an episode
     return data from episode 
@@ -195,10 +218,6 @@ class MRLAgent():
     reward_t = 0
     action_t = 0
     state_t = 0
-    if training:
-      dropout_rate = 0.1
-    else:
-      dropout_rate = 0.0
     self.env.reset()
     ## unroll episode feeding placeholders in online mode
     while terminate == False:
@@ -254,16 +273,16 @@ class MRLAgent():
     for ep in range(nepisodes_train):
       if ep%(nepisodes_train/100)==0:
         print(ep/nepisodes_train)
-      episode_buffer = self.unroll_episode(training=True)
+      episode_buffer = self.unroll_episode()
       self.update(episode_buffer)
     return None
 
-  def eval(self,nepisodes_eval):
+  def eval(self,nepisodes_eval,eplen):
     """ 
     """
-    rewards_eval = np.ones([nepisodes_eval,EPLEN])*100
+    rewards_eval = np.ones([nepisodes_eval,eplen])*100
     for i in range(nepisodes_eval):
-      ep_buf = self.unroll_episode(training=False)
+      ep_buf = self.unroll_episode()
       r = ep_buf[:,2]
       rewards_eval[i] = r
     return rewards_eval
