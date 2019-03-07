@@ -23,8 +23,9 @@ module load openmpi/gcc/2.1.0/64 # srm
 
 printf "\n\n MRL sweep \n\n"
 
+#
 srun python -u "/tigress/abeukers/wd/mrl/trainsave.py" ${stsize} ${optimizer} ${lr} ${gamma}
-
+#
 
 printf "\n\nGPU profiling \n\n"
 sacct --format="elapsed,CPUTime,TotalCPU"

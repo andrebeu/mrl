@@ -2,8 +2,9 @@
 
 printf "\n\n -- cluster_loop --\n"
 
-stamp=$(date +"%m%d%H%M%S")
-wd_dir="/tigress/abeukers/wd/cswNets"
+#
+wd_dir="/tigress/abeukers/wd/mrl" 
+#
 
 declare -a stsize_arr=(25 50 75)
 declare -a lr_arr=(1 10 100 1000 5 5000)
