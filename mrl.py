@@ -6,11 +6,7 @@ import scipy
 
 """ TODO
 
-- random length episodes during training, fixed length episodes during eval
-- different rand seeds
-
--- setup param sweep, which takes snapshots (i.e. eval on held out trials) 
-  at multiple times during training
+sweep gamma, learning rate, optimizer. 
 
 """
 
@@ -48,8 +44,8 @@ class BanditsSim1():
   def __init__(self):
     self.reset()
     
-  def reset(self):
-    eplen = np.random.uniform(50,100)
+  def reset(self,eplen_=None):
+    eplen = eplen_ or np.random.uniform(50,100)
     p0 = np.random.uniform(0,0.5) 
     self.new_episode(eplen,p0)
 
@@ -78,15 +74,16 @@ class BanditsSim1():
 
 class MRLAgent():
 
-  def __init__(self,stsize=50,gamma=0.9,task=BanditsSim1()):
+  def __init__(self,stsize=50,gamma=0.9,optimizer=None,task=BanditsSim1()):
     """
     """
     self.num_actions = 2
     self.stsize = stsize
     self.batch_size = 1
     self.gamma = gamma
-    self.graph = tf.Graph()
     self.env = task
+    self.optimizer = optimizer or tf.train.RMSPropOptimizer(0.00005)
+    self.graph = tf.Graph()
     self.sess = tf.Session(graph=self.graph)
     self.build()
     return None
@@ -99,9 +96,10 @@ class MRLAgent():
       # setup loss
       self.returns,self.deltas = self.loss_placeholders()
       self.loss = self.setup_loss()
-      self.minimizer = tf.train.RMSPropOptimizer(0.00005).minimize(self.loss)
+      self.minimizer = self.optimizer.minimize(self.loss)
       ## initialize
       self.sess.run(tf.global_variables_initializer())
+      self.saver_op = tf.train.Saver()
 
   def setup_loss_(self):
     """ 
@@ -202,11 +200,10 @@ class MRLAgent():
               [self.states_t]
               ],-1)
     return concat_inputs
-
  
   ## Training and evaluating
 
-  def unroll_episode(self,):
+  def unroll_episode(self,eplen=None):
     """
     unroll agent on environment over an episode
     return data from episode 
@@ -218,7 +215,7 @@ class MRLAgent():
     reward_t = 0
     action_t = 0
     state_t = 0
-    self.env.reset()
+    self.env.reset(eplen)
     ## unroll episode feeding placeholders in online mode
     while terminate == False:
       action_dist,value_state_t = self.sess.run(
@@ -277,12 +274,12 @@ class MRLAgent():
       self.update(episode_buffer)
     return None
 
-  def eval(self,nepisodes_eval,eplen):
+  def eval(self,nepisodes_eval,eplen=75):
     """ 
     """
     rewards_eval = np.ones([nepisodes_eval,eplen])*100
     for i in range(nepisodes_eval):
-      ep_buf = self.unroll_episode()
+      ep_buf = self.unroll_episode(eplen)
       r = ep_buf[:,2]
       rewards_eval[i] = r
     return rewards_eval
