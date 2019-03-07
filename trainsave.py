@@ -6,14 +6,14 @@ import numpy as np
 from mrl import *
 
 # model specs
-stsize = sys.argv[1]
-optimizer = sys.argv[2]
-lr = sys.argv[3] # divide by 1e-05
-gamma = sys.argv[4]
+stsize = int(sys.argv[1])
+optimizer = str(sys.argv[2])
+lr = int(sys.argv[3]) # divide by 1e-05
+gamma = int(sys.argv[4])
 # train time
-nsess = 2 
-epochs_per_sess = 100
-eval_nepochs = 10
+nsess = 10
+epochs_per_sess = 10000
+eval_nepochs = 1500
 
 print('lr',lr/100000)
 opt_dict = {'rms':tf.train.RMSPropOptimizer(lr/100000),
