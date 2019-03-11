@@ -15,6 +15,7 @@ stsize=${1}
 optimizer=${2}
 lr=${3}
 gamma=${4}
+seed=${5}
 
 module load anaconda3/4.4.0
 module load cudnn/cuda-9.1/7.1.2
@@ -24,7 +25,7 @@ module load openmpi/gcc/2.1.0/64 # srm
 printf "\n\n MRL sweep \n\n"
 
 #
-srun python -u "/tigress/abeukers/wd/mrl/trainsave.py" ${stsize} ${optimizer} ${lr} ${gamma}
+srun python -u "/tigress/abeukers/wd/mrl/trainsave.py" ${stsize} ${optimizer} ${lr} ${gamma} ${seed}
 #
 
 printf "\n\nGPU profiling \n\n"

@@ -8,33 +8,42 @@ from mrl import *
 # model specs
 stsize = int(sys.argv[1])
 optimizer = str(sys.argv[2])
-lr = int(sys.argv[3]) # divide by 1e-05
+lr = int(sys.argv[3]) 
 gamma = int(sys.argv[4])
+seed = int(sys.argv[5])
+
 # train time
 nsess = 10
-epochs_per_sess = 10000
-eval_nepochs = 1500
+epochs_per_sess = 1500
+eval_nepochs = 1000
 
-print('lr',lr/100000)
-opt_dict = {'rms':tf.train.RMSPropOptimizer(lr/100000),
-						'adam':tf.train.AdamOptimizer(lr/100000)}
+print('lr',lr/1e-5)
+opt_dict = {'rms':tf.train.RMSPropOptimizer(lr/1e-5),
+						'adam':tf.train.AdamOptimizer(lr/1e-5)}
 
-agent = MRLAgent(gamma=gamma/100,optimizer=opt_dict[optimizer])
+agent = MRLAgent(gamma=gamma/100,optimizer=opt_dict[optimizer],seed=seed)
 
 ## make dir
-model_name = 'state_%i-opt_%s-lr_%i'%(stsize,optimizer,lr)
-num_models = len(glob('models/sweep1/%s/*'%model_name)) 
-model_dir = 'models/sweep1/%s/%.3i'%(model_name,num_models) 
+model_name = 'state_%i-gamma_%i-opt_%s-lr_%ie-5'%(stsize,gamma,optimizer,lr)
+model_dir = 'models/sweep1/%s/%.3i'%(model_name,seed) 
 os.makedirs(model_dir)
 
+train_lossL = []
 for sess in range(nsess):
 	print('sess',sess/nsess)
-	fpath = model_name + '-trepochs%i'%((sess+1)*epochs_per_sess)
 	# train
-	agent.train(epochs_per_sess)
-	# save model
-	agent.saver_op.save(agent.sess,model_dir+'/'+fpath+'trained_model')
+	train_lossL.append(agent.train_curr(epochs_per_sess,eps=1))
 	# eval
-	eval_reward = agent.eval(eval_nepochs)
+	eval_reward82 = agent.eval(eval_nepochs,np.array([.8,.2]))
+	eval_reward28 = agent.eval(eval_nepochs,np.array([.2,.8]))
+
+	# save model and eval data
+	fpath = model_name + '-trepochs%i'%((sess+1)*epochs_per_sess)
+	np.save(model_dir+'/'+fpath+'-evalrewards82',eval_reward82)
+	np.save(model_dir+'/'+fpath+'-evalrewards28',eval_reward28)
+	agent.saver_op.save(agent.sess,model_dir+'/'+fpath+'-model_chkpoint')
 	# periodically save eval data
-	np.save(model_dir+'/'+fpath+'-evalrewards',eval_reward)
+	
+# save train loss
+train_data = np.concatenate(train_lossL)
+np.save(model_dir+'/'+model_name+'-train_loss',train_data)
