@@ -2,15 +2,26 @@ import os
 import tensorflow as tf
 import numpy as np
 import scipy
-
+from scipy import signal
 
 """ TODO
-
 sweep gamma, learning rate, optimizer. 
+implement uniform independet arms
 
+-- Ji-Sung
+LR 7e-4 - 1e-2
+gamma 0.2 - 0.8 (0.6)
+stsize 24 - 48
+
+extra:
+LR decay
+gamma annealing 
+
+read:
+generalized advantage estimation (schulman et al., 15)
 """
 
-EPLEN = 75
+EPLEN = 30
 
 class SwitchingBandits():
 
@@ -72,17 +83,44 @@ class BanditsSim1():
     return self.state,reward,terminate
 
 
+class IndependentBandits():
+
+  def __init__(self,eplen=EPLEN):
+    self.final_state = eplen
+    self.reset()
+
+  def reset(self,banditpr=None):
+    # random arm setup between episode
+    if type(banditpr)==type(None):
+      self.banditpr = np.random.uniform([0,0])
+    else:
+      self.banditpr = banditpr 
+    self.terminate = False
+    self.state = 0
+    return None
+
+  def pullArm(self,action):
+    """ 
+    """
+    reward = np.random.binomial(1,self.banditpr[action])
+    self.state += 1
+    terminate = self.state >= self.final_state
+    return self.state,reward,terminate
+
+
+
 class MRLAgent():
 
-  def __init__(self,stsize=50,gamma=0.9,optimizer=None,task=BanditsSim1()):
+  def __init__(self,stsize=48,gamma=.75,optimizer=None,seed=1):
     """
     """
+    self.seed = seed
     self.num_actions = 2
     self.stsize = stsize
     self.batch_size = 1
     self.gamma = gamma
-    self.env = task
-    self.optimizer = optimizer or tf.train.RMSPropOptimizer(0.00005)
+    self.env = IndependentBandits()
+    self.optimizer = optimizer or tf.train.AdamOptimizer(5e-3)
     self.graph = tf.Graph()
     self.sess = tf.Session(graph=self.graph)
     self.build()
@@ -90,206 +128,255 @@ class MRLAgent():
 
   def build(self):
     with self.graph.as_default():
+      tf.random.set_random_seed(self.seed)
       # forward propagate inputs
-      self.concat_inputs = self.input_placeholders() # [r(t-1),action(t-1),obs(t)]
-      self.value,self.policy = self.RNN(self.concat_inputs)
+      self.value_hat,self.policy = self.RNN()
       # setup loss
-      self.returns,self.deltas = self.loss_placeholders()
       self.loss = self.setup_loss()
       self.minimizer = self.optimizer.minimize(self.loss)
       ## initialize
       self.sess.run(tf.global_variables_initializer())
       self.saver_op = tf.train.Saver()
 
-  def setup_loss_(self):
-    """ 
-    sums range over episode
-    """  
-    ## Loss functions
-    # policy loss: L = A(s,a) * -logpi(a|s)
-    pr_action_t = tf.reduce_sum(self.policy * self.actions_t_onehot) 
-    policy_loss = - tf.reduce_sum(tf.log(pr_action_t + 1e-7) * self.advantages)
-    #
-    value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_value - self.value)) 
-    entropy_loss = - tf.reduce_sum(self.policy * tf.log(self.policy + 1e-7))
-    loss = 0.5 * value_loss + policy_loss - entropy_loss * 0.05
-    return loss
 
   def setup_loss(self):
     """ 
     """  
-    # L_v = delta*value
-    loss_value = self.value*self.deltas
-    # L_p = log(pi(a|s))*delta
-    pi_a = tf.reduce_sum(self.policy * self.actions_t_onehot)
-    loss_policy = tf.log(pi_a) * self.deltas
-    # L_e = H(pi(a|s))
-    loss_entropy = - tf.reduce_sum(self.policy * tf.log(self.policy + 1e-7))
-    # final loss
-    loss = loss_policy + 0.05*loss_value + 0.05*loss_entropy
-    return loss
+    self.loss_placeholders() # advantages, returns 
+    # value
+    self.loss_value = (0.5) * tf.reduce_mean(tf.square(self.value_hat - self.returns_ph))
+    # policy
+    self.pi_a = tf.reduce_sum(self.policy * self.actions_t_onehot,axis=-1)
+    self.loss_policy = (-1) * tf.reduce_mean(tf.log(self.pi_a+1e-7) * self.advantages_ph)
+    # entropy
+    self.entropy = (-1) * tf.reduce_sum(self.policy * tf.log(self.policy+1e-7),axis=-1)
+    self.loss_entropy = (-1) * tf.reduce_mean(self.entropy)
+    # overall
+    self.loss = self.loss_policy + (0.05)*self.loss_value + (0.01)*self.loss_entropy
+    return self.loss
 
-  def RNN(self,concat_inputs):
+  def RNN(self):
     """ Architecture design (LSTM for TD):
     """
-    # setup cell
-    lstm_cell = tf.keras.layers.LSTMCell(self.stsize)
-    init_state = lstm_cell.get_initial_state(
-                    tf.get_variable('initial_state',trainable=True,
-                      shape=[self.batch_size,self.stsize]))
-    # network layers
-    lstm_layer = tf.keras.layers.RNN(lstm_cell,
-                    return_sequences=True,
-                    return_state=True)
+    self.input_placeholders() # [r(t-1),action(t-1),obs(t)]
+    ## TF RNN
+    init_state = tf.nn.rnn_cell.LSTMStateTuple(self.lstm_cstate,self.lstm_hstate)
+
+    cell = tf.nn.rnn_cell.LSTMCell(self.stsize)
+    lstm_outputs,lstm_final_states = tf.nn.dynamic_rnn(
+      cell=cell,inputs=self.concat_inputs,initial_state=init_state)
+    self.lstm_final_cstate,self.lstm_final_hstate = lstm_final_states
+    self.lstm_outputs = lstm_outputs
+    # readout
     value_layer = tf.keras.layers.Dense(1,
                     activation=None,
-                    kernel_initializer='glorot_uniform')
+                    kernel_initializer='glorot_uniform',
+                    name='value_layer')
     policy_layer = tf.keras.layers.Dense(self.num_actions,
                     activation=tf.nn.softmax,
-                    kernel_initializer='glorot_uniform')
-    # dropout layers
-    # value_dropout = tf.keras.layers.Dropout(self.dropout_rate)
-    # policy_dropout = tf.keras.layers.Dropout(self.dropout_rate)
-    # activations
-    lstm_outputs,final_output,lstm_state = lstm_layer(concat_inputs,initial_state=init_state)
-    # value = value_dropout(value_layer(lstm_outputs))
-    # policy = policy_dropout(policy_layer(lstm_outputs))
-    value = value_layer(lstm_outputs)
+                    kernel_initializer='glorot_uniform',
+                    name='policy_layer')
+    value = tf.squeeze(value_layer(lstm_outputs),axis=-1)
     policy = policy_layer(lstm_outputs)
     return value,policy
 
   def loss_placeholders(self):
-    with self.graph.as_default():
-      ## loss placeholders
-      returns = tf.placeholder(name='returns',
-            shape=[1,None], 
-            dtype=tf.float32)
-      deltas = tf.placeholder(name='deltas',
-              shape=[1,None], 
-              dtype=tf.float32)
-    return returns,deltas
+    self.returns_ph = tf.placeholder(
+          name='returns',
+          shape=[1,None,], 
+          dtype=tf.float32)
+    self.advantages_ph = tf.placeholder(
+          name='advantages',
+          shape=[1,None,], 
+          dtype=tf.float32)
+    self.actions_t = tf.placeholder(
+          name='actions_t',
+          shape=[1,None,],
+          dtype=tf.int32)
+    self.actions_t_onehot = tf.one_hot(
+          self.actions_t,self.num_actions,
+          name='actions_t_onehot',dtype=tf.float32)
+    return None
 
   def input_placeholders(self):
-    """
-    """
-    with self.graph.as_default():
-      ## input placeholders
-      self.rewards_tm1 = tf.placeholder(name='rewards_tm1',
-            shape=[None,1],
-            dtype=tf.float32)
-      self.states_t = tf.placeholder(name='states_t',
-            shape=[None,1],
-            dtype=tf.float32) 
-      # onehot actions
-      self.actions_tm1 = tf.placeholder(name='actions_tm1',
-            shape=[None],
-            dtype=tf.int32)
-      self.actions_t = tf.placeholder(name='actions_t',
-            shape=[None],
-            dtype=tf.int32)
-      self.actions_t_onehot = tf.one_hot(
-            self.actions_t,self.num_actions,
-            name='actions_t_onehot',dtype=tf.float32)
-      self.actions_tm1_onehot = tf.one_hot(
-            self.actions_tm1,self.num_actions,
-            name='actions_tm1_onehot',dtype=tf.float32)
-      # concat over units dim
-      concat_inputs = tf.concat([
-              [self.rewards_tm1],
-              [self.actions_tm1_onehot],
-              [self.states_t]
-              ],-1)
-    return concat_inputs
+    ## input placeholders
+    self.prev_rewards = tf.placeholder(
+          name='prev_rewards',
+          shape=[1,None,],
+          dtype=tf.float32)
+    self.states_t = tf.placeholder(
+          name='states_t',
+          shape=[1,None,],
+          dtype=tf.float32) 
+    # onehot actions
+    self.prev_actions = tf.placeholder(
+          name='prev_actions',
+          shape=[1,None,],
+          dtype=tf.int32)
+    self.prev_actions_onehot = tf.one_hot(
+          self.prev_actions,self.num_actions,
+          name='prev_actions_onehot',dtype=tf.float32)
+    # concat over units dim
+    # self.concat_inputs = tf.concat([
+    #         tf.expand_dims(self.prev_rewards,-1),
+    #         self.prev_actions_onehot,
+    #         tf.expand_dims(self.states_t,-1)
+    #         ],axis=-1)
+    self.concat_inputs = tf.concat([
+            tf.expand_dims(self.prev_rewards,-1),
+            self.prev_actions_onehot
+            ],axis=-1)
+    # init cell state 
+    self.lstm_cstate = tf.placeholder(
+                        name='lstm_cstate_ph',
+                        shape=[1,self.stsize],
+                        dtype=tf.float32)
+    self.lstm_hstate = tf.placeholder(
+                        name='lstm_hstate_ph',
+                        shape=[1,self.stsize],
+                        dtype=tf.float32)
+    return None
  
   ## Training and evaluating
 
-  def unroll_episode(self,eplen=None):
-    """
-    unroll agent on environment over an episode
-    return data from episode 
+  def unroll_episode(self):
+    """ online agent-environment interaction
+    unroll agent online (i.e. one timestep at a time) over an episode
+    return (int) data from episode 
       [state,action,reward,value(state)]_i for i [0,eplen)
     """
     ## initialize episode
     episode_buffer = []
+    ep_buffer = -1*np.ones([EPLEN,4])
     terminate = False
-    reward_t = 0
     action_t = 0
-    state_t = 0
-    self.env.reset(eplen)
+    reward_t = 0
+    state_tp1 = 0
+    assert self.env.state==0
     ## unroll episode feeding placeholders in online mode
+    lstm_cstate,lstm_hstate = np.zeros([2,1,self.stsize])
     while terminate == False:
-      action_dist,value_state_t = self.sess.run(
-        [self.policy,self.value], 
+      # include batch and dim dimensions for feeding
+      prev_action = np.expand_dims(np.expand_dims(action_t,0),-1)
+      prev_reward = np.expand_dims(np.expand_dims(reward_t,0),-1)
+      state_t = np.expand_dims(np.expand_dims(state_tp1,0),-1)
+      # feed online
+      (action_dist,value_state_t,
+      lstm_outputs,lstm_cstate,lstm_hstate) = self.sess.run([
+        self.policy,self.value_hat,
+        self.lstm_outputs,self.lstm_final_cstate,self.lstm_final_hstate], 
           feed_dict={
-            self.rewards_tm1: [[reward_t]], 
-            self.states_t: [[state_t]],
-            self.actions_tm1: [action_t],
-            # self.dropout_rate: dropout_rate
+            self.lstm_cstate: lstm_cstate,
+            self.lstm_hstate: lstm_hstate,
+            self.states_t: state_t,
+            self.prev_rewards: prev_reward, 
+            self.prev_actions: prev_action,
             }) 
       # Take an action using probabilities from policy network output.
       action_t = np.random.choice([0,1],p=action_dist.squeeze())
       # observe reward and next_state
-      state_t, reward_t, terminate = self.env.pullArm(action_t)
-      # collect episode information in buffer
-      episode_buffer.append([state_t, action_t, reward_t, value_state_t])
-    return np.array(episode_buffer)
+      state_tp1, reward_t, terminate = self.env.pullArm(action_t)
+      # collect episode (int) data in buffer
+      ep_buffer[state_t,:] = np.array([state_t,action_t,reward_t,value_state_t])
+    return ep_buffer
+
+  def process_buffer(self,episode_buffer,td_error=True):
+    ## -wrap in .process_buffer()- ## 
+    states = episode_buffer[:,0]
+    actions = episode_buffer[:,1]
+    rewards = episode_buffer[:,2]
+    ep_values = episode_buffer[:,3]
+    ## compute return 
+    if td_error:
+      rewards_strapped = np.concatenate((rewards, [0.]))
+      value_strapped = np.concatenate((ep_values, [0.]))
+      returns = _discount(rewards_strapped,self.gamma)[:-1]
+      advantages = rewards + self.gamma * value_strapped[1:] - value_strapped[:-1]
+      advantages = _discount(advantages,self.gamma)
+    else:
+      returns = _discount(rewards,self.gamma)
+      advantages = ep_values - returns 
+    # shifted actions and rewards
+    prev_rewards = np.concatenate([[0],rewards[:-1]])
+    prev_actions = np.concatenate([[0],actions[:-1]])
+    return states,actions,prev_rewards,prev_actions,returns,advantages
 
   def update(self,episode_buffer):
     """
     episode_buffer contains [state,action,reward,value(state)]_i for i [0,eplen)
     using rollout data, compute advantage and discounted returns
     """
-    ep_states = episode_buffer[:,0:1] 
-    ep_actions = episode_buffer[:,1]
-    ep_rewards = episode_buffer[:,2:3]
-    ep_values = episode_buffer[:,3]
-    ## compute return, and td advantage error
-    ep_returns = compute_returns(ep_rewards,ep_values[-1],self.gamma)
-    ep_deltas = ep_returns - ep_values
-    # shifted actions and rewards
-    ep_rewards_tm1 = np.insert(ep_rewards[:-1,:],0,0,axis=0)
-    ep_actions_tm1 = np.insert(ep_actions[:-1],0,0)
-    # ep_discounted_advantages = discount(ep_advantages,self.gamma)
+    (states, actions, prev_rewards, prev_actions,
+      ep_returns, ep_advantages) = self.process_buffer(episode_buffer)
     ## update network using data from episode unroll
+    init_lstm_cstate,init_lstm_hstate = np.zeros([2,1,self.stsize])
     feed_dict = {
-        self.states_t:ep_states,
-        self.actions_t:ep_actions,
-        self.rewards_tm1:ep_rewards_tm1,
-        self.actions_tm1:ep_actions_tm1,
-        self.returns:[ep_returns],
-        self.deltas:[ep_deltas],
-        # self.dropout_rate:0.0
-        }
-    self.sess.run(self.minimizer,feed_dict=feed_dict)
-    return None
+      self.lstm_cstate:init_lstm_cstate,
+      self.lstm_hstate:init_lstm_hstate,
+        self.prev_rewards:[prev_rewards],
+        self.prev_actions:[prev_actions],
+        self.states_t:[states],
+        self.actions_t:[actions],
+      self.returns_ph:[ep_returns],
+      self.advantages_ph:[ep_advantages],
+        } # NB including batch dimension
+    # print(ep_values)
+    ## -- ##
+    # check norms of gradients
+    ## -- ##
+    _,loss,vloss,ploss,eloss = self.sess.run([self.minimizer,
+        self.loss,self.loss_value,self.loss_policy,self.loss_entropy
+        ],feed_dict=feed_dict)
+    return np.array([loss,vloss,ploss,eloss])
 
-  def train(self,nepisodes_train):
+  def train(self,nepisodes_train,eps=25):
     """
     """
+    print('tder')
     rewards_train = np.zeros([nepisodes_train])
+    train_loss = np.zeros([nepisodes_train,4])
     for ep in range(nepisodes_train):
       if ep%(nepisodes_train/100)==0:
         print(ep/nepisodes_train)
+      if ep%eps==0:
+        train_bandit = np.random.uniform([0,0])
+        print(train_bandit)
+      self.env.reset(banditpr=train_bandit)
       episode_buffer = self.unroll_episode()
-      self.update(episode_buffer)
-    return None
+      ep_loss = self.update(episode_buffer)
+      train_loss[ep] = ep_loss
+    return train_loss
 
-  def eval(self,nepisodes_eval,eplen=75):
+  def train_curr(self,nepisodes_train,eps=25):
+    train_loss = np.zeros([nepisodes_train,4])
+    train_bandit = np.array([0.8,0.2])
+    for ep in range(nepisodes_train):
+      if ep%(nepisodes_train/100)==0:
+        print(ep/nepisodes_train)
+      if ep%eps==0:
+        train_bandit = np.roll(train_bandit,1)
+      self.env.reset(banditpr=train_bandit)
+      episode_buffer = self.unroll_episode()
+      ep_loss = self.update(episode_buffer)
+      train_loss[ep] = ep_loss
+    return train_loss
+
+  def eval(self,nepisodes_eval,eval_bandit,eplen=EPLEN):
     """ 
     """
-    rewards_eval = np.ones([nepisodes_eval,eplen])*100
+    # if type(eval_bandit)==type(None):
+    #   eval_bandit = np.array([0.2,0.8])
+    rewards_eval = np.ones([nepisodes_eval,eplen])*787
     for i in range(nepisodes_eval):
-      ep_buf = self.unroll_episode(eplen)
-      r = ep_buf[:,2]
-      rewards_eval[i] = r
+      self.env.reset(banditpr=eval_bandit)
+      ep_buf = self.unroll_episode()
+      episode_reward = ep_buf[:,2]
+      rewards_eval[i] = episode_reward
     return rewards_eval
     
 
-def compute_returns(rewards,value_T,gamma):
-  eplen = len(rewards)
-  final_state = eplen-1
-  returns = np.ones(eplen)*898
-  returns[-1] = value_T
-  for t in range(final_state-1,-1,-1):
-    returns[t] = rewards[t] + gamma*returns[t+1]
-  return returns
+
+def _discount(x,gamma):
+  """ computes same thing as above, except faster
+  """
+  return signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
