@@ -128,7 +128,7 @@ class MRLAgent():
 
   def build(self):
     with self.graph.as_default():
-      tf.random.set_random_seed(self.seed)
+      tf.set_random_seed(self.seed)
       # forward propagate inputs
       self.value_hat,self.policy = self.RNN()
       # setup loss
