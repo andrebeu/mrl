@@ -13,7 +13,7 @@ gamma = int(sys.argv[4])
 seed = int(sys.argv[5])
 
 # train time
-nsess = 3
+nsess = 10
 epochs_per_sess = 1500
 eval_nepochs = 1000
 
