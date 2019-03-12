@@ -23,89 +23,57 @@ generalized advantage estimation (schulman et al., 15)
 
 EPLEN = 30
 
-class SwitchingBandits():
 
-  def __init__(self,shiftpr=0.1,armpr=0.9,eplen=EPLEN):
-    self.banditpr = np.array([armpr,1-armpr])
-    self.shiftpr = shiftpr
+class SwitchingDependentBandits():
+  """ 
+  arms have dependent probabilities (0.2,0.8)
+  bandit switches within episodes
+    switch can either be controlled by a probability
+    or by the state number
+  """
+  def __init__(self,banditpr=.8,switch_param=0,eplen=EPLEN):
     self.final_state = eplen
+    self.banditpr = banditpr
+    if switch_param <= 1: 
+      self.switch_rule = 'prob' # probabilistic switch
+      self.switchpr = switch_param
+    elif switch_param > 1: 
+      self.switch_rule = 'det' # determinstic switch
+      self.switch_state = switch_param
+    self.bandit = None
     self.reset()
 
   def reset(self):
     # random arm setup between episode
-    np.random.shuffle(self.banditpr) 
+    self.bandit = np.array([self.banditpr,1-self.banditpr]) 
+    np.random.shuffle(self.bandit)
     self.terminate = False
     self.state = 0
     return None
 
-  def pullArm(self,action):
-    """ 
-    """
-    if np.random.binomial(1,self.shiftpr):
-      # within episode shift
-      self.banditpr = np.roll(self.banditpr,1)
-    reward = np.random.binomial(1,self.banditpr[action])
-    self.state += 1
-    terminate = self.state == self.final_state
-    return self.state,reward,terminate
-
-
-class BanditsSim1():
-
-  def __init__(self):
-    self.reset()
-    
-  def reset(self,eplen_=None):
-    eplen = eplen_ or np.random.uniform(50,100)
-    p0 = np.random.uniform(0,0.5) 
-    self.new_episode(eplen,p0)
-
-  def new_episode(self,eplen,p0):
-    self.state = 0
-    self.final_state = eplen-1
-    self.p0 = np.array([p0,0.5-p0])
-    self.n_a = np.array([0,0])
-
-  def pullArm(self,action):
-    # compute pr_reward(action)
-    self.pr_reward = 1-(1-self.p0[action])**(self.n_a[action]+1)
-    # self.pr_rewards = [1-(1-self.p0[0])**(self.n_a[0]+1),
-    #                   1-(1-self.p0[1])**(self.n_a[1]+1)]
-    # draw reward
-    reward = np.random.binomial(1,self.pr_reward)
-    # update n(a)
-    self.n_a[action] = 0
-    self.n_a[(action+1)%2] += 1
-    # final state
-    terminate = self.state >= self.final_state
-    # update state
-    self.state += 1
-    return self.state,reward,terminate
-
-
-class IndependentBandits():
-
-  def __init__(self,eplen=EPLEN):
-    self.final_state = eplen
-    self.reset()
-
-  def reset(self,banditpr=None):
+  def eval_reset(self,banditpr):
     # random arm setup between episode
-    if type(banditpr)==type(None):
-      self.banditpr = np.random.uniform([0,0])
-    else:
-      self.banditpr = banditpr 
+    self.bandit = np.array([banditpr,1-banditpr]) 
     self.terminate = False
     self.state = 0
     return None
 
+  def switch(self):
+    self.bandit = np.roll(self.bandit,1)
+
   def pullArm(self,action):
-    """ 
-    """
-    reward = np.random.binomial(1,self.banditpr[action])
+    reward = np.random.binomial(1,self.bandit[action])
     self.state += 1
     terminate = self.state >= self.final_state
+    # probabilistic switch
+    if self.switch_rule=='prob':
+      if np.random.binomial(1,self.switchpr):
+        self.switch()
+    elif self.switch_rule=='det':
+      if self.state == self.switch_state:
+        self.switch()
     return self.state,reward,terminate
+
 
 
 
@@ -119,7 +87,7 @@ class MRLAgent():
     self.stsize = stsize
     self.batch_size = 1
     self.gamma = gamma
-    self.env = IndependentBandits()
+    self.env = SwitchingDependentBandits()
     self.optimizer = optimizer or tf.train.AdamOptimizer(5e-3)
     self.graph = tf.Graph()
     self.sess = tf.Session(graph=self.graph)
@@ -252,6 +220,7 @@ class MRLAgent():
     action_t = 0
     reward_t = 0
     state_tp1 = 0
+    
     assert self.env.state==0
     ## unroll episode feeding placeholders in online mode
     lstm_cstate,lstm_hstate = np.zeros([2,1,self.stsize])
@@ -332,43 +301,22 @@ class MRLAgent():
   def train(self,nepisodes_train,eps=25):
     """
     """
-    print('tder')
-    rewards_train = np.zeros([nepisodes_train])
     train_loss = np.zeros([nepisodes_train,4])
     for ep in range(nepisodes_train):
       if ep%(nepisodes_train/100)==0:
         print(ep/nepisodes_train)
-      if ep%eps==0:
-        train_bandit = np.random.uniform([0,0])
-        print(train_bandit)
-      self.env.reset(banditpr=train_bandit)
+      self.env.reset()
       episode_buffer = self.unroll_episode()
       ep_loss = self.update(episode_buffer)
       train_loss[ep] = ep_loss
     return train_loss
 
-  def train_curr(self,nepisodes_train,eps=25):
-    train_loss = np.zeros([nepisodes_train,4])
-    train_bandit = np.array([0.8,0.2])
-    for ep in range(nepisodes_train):
-      if ep%(nepisodes_train/100)==0:
-        print(ep/nepisodes_train)
-      if ep%eps==0:
-        train_bandit = np.roll(train_bandit,1)
-      self.env.reset(banditpr=train_bandit)
-      episode_buffer = self.unroll_episode()
-      ep_loss = self.update(episode_buffer)
-      train_loss[ep] = ep_loss
-    return train_loss
-
-  def eval(self,nepisodes_eval,eval_bandit,eplen=EPLEN):
+  def eval(self,nepisodes,banditpr,eplen=EPLEN):
     """ 
     """
-    # if type(eval_bandit)==type(None):
-    #   eval_bandit = np.array([0.2,0.8])
-    rewards_eval = np.ones([nepisodes_eval,eplen])*787
-    for i in range(nepisodes_eval):
-      self.env.reset(banditpr=eval_bandit)
+    rewards_eval = np.ones([nepisodes,eplen])*787
+    for i in range(nepisodes):
+      self.env.eval_reset(banditpr)
       ep_buf = self.unroll_episode()
       episode_reward = ep_buf[:,2]
       rewards_eval[i] = episode_reward
