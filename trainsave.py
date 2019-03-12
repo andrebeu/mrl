@@ -13,19 +13,19 @@ gamma = int(sys.argv[4])
 seed = int(sys.argv[5])
 
 # train time
-nsess = 10
+nsess = 3
 epochs_per_sess = 1500
 eval_nepochs = 1000
 
-print('lr',lr/1e-5)
-opt_dict = {'rms':tf.train.RMSPropOptimizer(lr/1e-5),
-						'adam':tf.train.AdamOptimizer(lr/1e-5)}
+print('lr',lr/1e5)
+opt_dict = {'rms':tf.train.RMSPropOptimizer(lr/1e5),
+						'adam':tf.train.AdamOptimizer(lr/1e5)}
 
 agent = MRLAgent(gamma=gamma/100,optimizer=opt_dict[optimizer],seed=seed)
 
 ## make dir
 model_name = 'state_%i-gamma_%i-opt_%s-lr_%ie-5'%(stsize,gamma,optimizer,lr)
-model_dir = 'models/sweep1/%s/%.3i'%(model_name,seed) 
+model_dir = 'models/sweep2/%s/%.3i'%(model_name,seed) 
 os.makedirs(model_dir)
 
 train_lossL = []
