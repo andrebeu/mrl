@@ -62,13 +62,14 @@ class MRLBandit():
   """ metaRL bandit
   dependent arm probabilities e.g. (0.2,0.8)
   """
-  def __init__(self,banditpr,eplen,narms=2):
+  def __init__(self,banditpr,eplen,switch_param=-1,narms=2):
+    self.switch_param = switch_param
     self.narms=narms
     self.final_state = eplen
     self.banditpr = banditpr
     self.state = None
-    self.reset()
     self.shuffle_bestarm = True
+    self.reset()
 
   def reset(self):
     # random arm setup between episode
@@ -79,7 +80,18 @@ class MRLBandit():
       np.random.shuffle(self.banditprs)
     return None
 
+  def switch(self):
+    self.bandit = np.roll(self.banditpr,1)
+
   def step(self,action):
+    # switch on state number
+    if self.switch_param == self.state:
+      self.switch()
+    # probabilistically switch
+    elif self.switch_param < 1:
+      if np.random.binomial(1,self.switch_param):
+        self.switch()
+    ##
     self.state += 1
     reward = np.random.binomial(1,self.banditprs[action])
     terminate = self.state > self.final_state
