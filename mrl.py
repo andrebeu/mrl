@@ -23,6 +23,11 @@ generalized advantage estimation (schulman et al., 15)
 
 EPLEN = 30
 
+""" 
+need a way to change switch modes between train and eval
+"""
+
+
 
 class SwitchingDependentBandits():
   """ 
@@ -87,7 +92,7 @@ class MRLAgent():
     self.stsize = stsize
     self.batch_size = 1
     self.gamma = gamma
-    self.env = SwitchingDependentBandits()
+    self.env = None # define env in train or eval method
     self.optimizer = optimizer or tf.train.AdamOptimizer(5e-3)
     self.graph = tf.Graph()
     self.sess = tf.Session(graph=self.graph)
@@ -105,7 +110,6 @@ class MRLAgent():
       ## initialize
       self.sess.run(tf.global_variables_initializer())
       self.saver_op = tf.train.Saver()
-
 
   def setup_loss(self):
     """ 
@@ -298,9 +302,11 @@ class MRLAgent():
         ],feed_dict=feed_dict)
     return np.array([loss,vloss,ploss,eloss])
 
-  def train(self,nepisodes_train,eps=25):
+  def train(self,nepisodes_train,switch_param=0,eps=25):
     """
     """
+    self.env = SwitchingDependentBandits(switch_param=switch_param)
+    print('train env = switching %f'%switch_param)
     train_loss = np.zeros([nepisodes_train,4])
     for ep in range(nepisodes_train):
       if ep%(nepisodes_train/100)==0:
@@ -311,9 +317,11 @@ class MRLAgent():
       train_loss[ep] = ep_loss
     return train_loss
 
-  def eval(self,nepisodes,banditpr,eplen=EPLEN):
+  def eval(self,nepisodes,banditpr,switch_param=15,eplen=EPLEN):
     """ 
     """
+    self.env = SwitchingDependentBandits(switch_param=switch_param)
+    print('eval env = switching %f'%switch_param)
     rewards_eval = np.ones([nepisodes,eplen])*787
     for i in range(nepisodes):
       self.env.eval_reset(banditpr)
@@ -321,7 +329,8 @@ class MRLAgent():
       episode_reward = ep_buf[:,2]
       rewards_eval[i] = episode_reward
     return rewards_eval
-    
+
+
 
 
 def _discount(x,gamma):
