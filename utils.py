@@ -5,59 +5,6 @@ from torch.distributions.categorical import Categorical
 
 
 
-class GeneralBandits():
-  """ 
-  arms have dependent probabilities (0.2,0.8)
-  bandit switches within episodes
-    switch can either be controlled by a probability
-    or by the state number
-  """
-  def __init__(self,narms=2,banditpr=.8,switch_param=0,eplen=30):
-    self.narms=narms
-    self.final_state = eplen
-    self.banditpr = banditpr
-    if switch_param <= 1: 
-      self.switch_rule = 'prob' # probabilistic switch
-      self.switchpr = switch_param
-    elif switch_param > 1: 
-      self.switch_rule = 'det' # determinstic switch
-      self.switch_state = switch_param
-    self.bandit = None
-    self.reset()
-
-  def reset(self):
-    # random arm setup between episode
-    self.bandit = np.array([self.banditpr,1-self.banditpr]) 
-    np.random.shuffle(self.bandit)
-    self.terminate = False
-    self.state = 0
-    return None
-
-  def eval_reset(self,banditpr):
-    # random arm setup between episode
-    self.bandit = np.array([banditpr,1-banditpr]) 
-    self.terminate = False
-    self.state = 0
-    return None
-
-  def switch(self):
-    self.bandit = np.roll(self.bandit,1)
-
-  def pullArm(self,action):
-    reward = np.random.binomial(1,self.bandit[action])
-    self.state += 1
-    terminate = self.state >= self.final_state
-    # probabilistic switch
-    if self.switch_rule=='prob':
-      if np.random.binomial(1,self.switchpr):
-        self.switch()
-    elif self.switch_rule=='det':
-      if self.state == self.switch_state:
-        self.switch()
-    obs = [self.state,action,reward]
-    return obs,reward,terminate
-
-
 class MRLBandit():
   """ metaRL bandit
   dependent arm probabilities e.g. (0.2,0.8)
