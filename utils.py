@@ -4,12 +4,19 @@ from collections import namedtuple
 from torch.distributions.categorical import Categorical
 
 
+Experience = namedtuple('Experience',[
+    'tstep','state','action','reward','state_tp1','rnn_state'
+])
+
 
 class MRLBandit():
-  """ metaRL bandit
-  dependent arm probabilities e.g. (0.2,0.8)
+  """ 
   """
   def __init__(self,banditpr,eplen,switch_param=-1,narms=2):
+    """ switching param specifies whether bandit probabilities
+    will switch only between episodes (if -1), probabilistically
+    (if float), or at given episde (if int)
+    """
     self.switch_param = switch_param
     self.narms=narms
     self.final_state = eplen
@@ -27,17 +34,20 @@ class MRLBandit():
       np.random.shuffle(self.banditprs)
     return None
 
-  def switch(self):
-    self.bandit = np.roll(self.banditpr,1)
-
-  def step(self,action):
+  def maybe_switch(self):
     # switch on state number
     if self.switch_param == self.state:
       self.switch()
     # probabilistically switch
-    elif self.switch_param < 1:
+    elif 0 < self.switch_param < 1:
       if np.random.binomial(1,self.switch_param):
         self.switch()
+
+  def switch(self):
+    self.banditprs = np.roll(self.banditprs,1)
+
+  def step(self,action):
+    self.maybe_switch()
     ##
     self.state += 1
     reward = np.random.binomial(1,self.banditprs[action])
@@ -49,10 +59,6 @@ class MRLBandit():
     obs_t = np.concatenate([[s_tm1],a_t,[r_t]])
     return obs_t,reward,terminate
 
-
-Experience = namedtuple('Experience',[
-    'tstep','state','action','reward','state_tp1','rnn_state'
-])
 
 class ActorCritic(tr.nn.Module):
   
@@ -156,10 +162,6 @@ class ActorCritic(tr.nn.Module):
     self.optiop.step()
     return None 
 
-# entropy
-# self.entropy = (-1) * tf.reduce_sum(self.policy * tf.log(self.policy+1e-7),axis=-1)
-# self.loss_entropy = (-1) * tf.reduce_mean(self.entropy)
-
 
 def compute_returns(rewards,gamma=1.0):
   """ 
@@ -174,7 +176,6 @@ def compute_returns(rewards,gamma=1.0):
       )) for t in range(T)
   ])
   return returns
-
 
 def unpack_expL(expLoD):
   """ 
