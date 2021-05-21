@@ -1,4 +1,4 @@
-# Meta-RL agent on bandits task.
+# Meta Reinforcement Learning on bandits task.
 Simple demo implementation of meta-RL in pytorch
 
 ### Repo materials
